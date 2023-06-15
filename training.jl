@@ -696,7 +696,7 @@ function testParams(coords,radians)
     iter=1
     while (i <= size(mixtura)[1])
         if (mixtura[i,4] > 700)
-            # Si llegamos al limite (6 componentes) descartamos
+            # Ninguna mixtura válida
             if (iter==5)
                 print("Limit exceeded")
                 return changeParams(0)
@@ -731,7 +731,7 @@ function testParams(coords,radians)
         i=1
         while (i <= size(mixtura)[1])
             if (mixtura[i,4] > 700)
-                # Si llegamos al limite (6 componentes) descartamos
+                # Ninguna mixtura válida
                 if (iter==5)
                     print("Limit exceeded")
                     return save
