@@ -1,36 +1,9 @@
-using DataFrames, CSV, RCall, LinearAlgebra
+using DataFrames, CSV, RCall, LinearAlgebra, Plots
 
 R"""
 library(movMF)
 library(circular)
 """
-
-# 1ro) Escoger una transicion para introducir el cambio
-# 2do) Simular secuencia con un cambio en las parámetros de la mixtura correspondiente en un instante de tiempo determinado
-#   (desde simulador en un csv)
-# 3ro) Leer secuencia simulada y obtener transiciones de la mixtura correspondiente
-# 4to) CUSUM
-
-secuencia = CSV.read("secuencia.csv",DataFrame)
-
-# Obtener momentos de transición desde "origen" hasta "destino"
-function transiciones(origen, destino)
-    v = Float64[]
-
-    for i in 1:nrow(secuencia)-1
-        if secuencia[i,:nodos]==origen && secuencia[i+1,:nodos]==destino
-            push!(v,secuencia[i+1,:minutos])
-        end
-    end
-
-    return v
-end
-
-transitions = transiciones(1, 2)
-
-
-# Otra forma para comprobar la correcta implementación de CUSUM
-# Simular directamente de la mixtura escogida
 
 # Leemos los parámetros de la mixtura
 function readParams(name)
@@ -77,13 +50,24 @@ function getParams(params)
     return mixtura
 end
 
-dormitorio_bano = readParams("dormitorio_bano")
-theta = Matrix(dormitorio_bano[:,5:6])
-alpha = dormitorio_bano[:,:alpha]
-mu = [dormitorio_bano[1,2],dormitorio_bano[1,3]]
+
+# -----------------------------------------------------------------------------------------------------------------
+# Lectura de parámetros
+# -----------------------------------------------------------------------------------------------------------------
+transicion = readParams("salon_cocina")
+theta = Matrix(transicion[:,5:6])
+alpha = transicion[:,:alpha]
 
 
-# Cambio en mu
+
+# -----------------------------------------------------------------------------------------------------------------
+# Cambio en los parámetros
+# -----------------------------------------------------------------------------------------------------------------
+theta_mod = copy(theta)
+alpha_mod = copy(alpha)
+
+# Cambio en mu de una componente
+mu = [transicion[1,2],transicion[1,3]]
 reshape(mu, 1, length(mu))
 @rput mu
 R"""
@@ -91,38 +75,59 @@ rad = coord2rad(t(as.matrix(mu)))
 """
 @rget rad
 
-rad = rad+3
+rad = rad+0.3
 coords = [cos(rad),sin(rad)]
 
-theta_mod = coords.*dormitorio_bano[1,4]
+theta_mod[1,:] = coords.*transicion[1,4]
 
-dormitorio_bano_mod = copy(dormitorio_bano)
-dormitorio_bano_mod[1,2]=coords[1]
-dormitorio_bano_mod[1,3]=coords[2]
-dormitorio_bano_mod[1,5]=theta_mod[1]
-dormitorio_bano_mod[1,6]=theta_mod[2]
 
-componentes = nrow(dormitorio_bano)
+# Cambio en kappa de una componente
+mu = [transicion[1,2],transicion[1,3]]
+kappa = transicion[1,4]
 
+kappa = kappa+5
+
+theta_mod[1,:] = mu.*kappa
+
+
+# Cambio en mu y kappa de una componente
+theta_mod[1,:] = coords.*kappa
+
+
+# Cambio en las proporciones (alpha)
+alpha_mod[1] = 0.5
+alpha_mod[2] = 0.25
+alpha_mod[3] = 0.25
+
+
+
+
+theta
+theta_mod
+
+alpha
+alpha_mod
+
+
+# -----------------------------------------------------------------------------------------------------------------
 # Simulamos sin y con cambio
+# -----------------------------------------------------------------------------------------------------------------
 @rput theta
 @rput theta_mod
 @rput alpha
+@rput alpha_mod
 R"""
-sample = rmovMF(65, theta, alpha)
-sample_mod = rmovMF(65, theta_mod, alpha)
-rads = coord2rad(sample)
-rads_mod = coord2rad(sample_mod)
+sample = rmovMF(15, theta, alpha)
+sample_mod = rmovMF(50, theta_mod, alpha_mod)
 """
 @rget sample
 @rget sample_mod
-@rget rads
-@rget rads_mod
 
 muestra_coords = vcat(sample,sample_mod)
-muestra_rads = vcat(rads,rads_mod)
-#muestra_coords = sample
-#muestra_rads = rads
+
+#Sin cambio
+muestra_coords = sample
+
 # ------------------------- CUSUM ------------------------------------
 
 # Obtener EMV del vector de parámetros para cambios en j = 1,...,N-40 con kappa < 700.
@@ -132,15 +137,17 @@ muestra_rads = vcat(rads,rads_mod)
 # muestral asequible en todos los casos.
 # Tendremos un total de N-40 EMVs.
 
-# Se descarta la posibilidad de cambios en el numero de componentes de la mixtura.
+# Se descarta la posibilidad de cambios en el numero de 
+#componentes de la mixtura.
 
 EMVs = []
-tam = length(muestra_rads)
-
+tam = length(muestra_coords[:,1])
+n = tam-40
+componentes = nrow(transicion)
 @rput componentes
 
 # Tamaño de muestra mínimo = 40
-for j in 1:tam-40
+for j in 1:n
     coords = muestra_coords[j:tam,:]
     @rput coords
     try
@@ -158,17 +165,13 @@ for j in 1:tam-40
     
 end
 
-# Obtener todas las sumas acumuladas 
-EMVs
+
+# Obtener todas las sumas acumuladas
 CumSums = []
 
-theta0 = Matrix(dormitorio_bano[:,5:6])
-alpha0 = dormitorio_bano[:,:alpha]
-
-@rput theta0
-@rput alpha0
-
-for j in 1:tam-40
+# Calculo del estadístico de la razón de verosimilitud generalizado 
+# para cada contraste
+for j in 1:n
     if EMVs[j] != 0
         muestra = muestra_coords[j:tam,:]
 
@@ -179,13 +182,13 @@ for j in 1:tam-40
         @rput theta1
         @rput alpha1
         R"""
-        p0 = dmovMF(muestra, theta0, alpha0)
+        p0 = dmovMF(muestra, theta, alpha)
         p1 = dmovMF(muestra, theta1, alpha1)
         """
         @rget p0
         @rget p1
 
-        cumsum = sum(log.(p1)-log.(p0))
+        cumsum = 2*sum(log.(p1)-log.(p0))
 
         push!(CumSums,cumsum)
 
@@ -194,120 +197,31 @@ for j in 1:tam-40
     end
 end
 
-
 # Aquí podemos ver que el valor máximo se corresponde a la suma acumulada con el punto de cambio
 # muy cercano al real.
 show(stdout, "text/plain", CumSums)
 
-using Plots
 
-x=range(1,70,length=70)
+# Plot CumSums
+x=range(1,n,length=n)
 plot(x,CumSums,title="",label=false)
-savefig("ratios-log-ver.png")
+
+savefig("cumsum_25_a05-025-025.png")
 
 
-# Tomar el maximo, es decir, en el que ocurre más veces que p0 < p1, o dicho de otra forma,
-# cuando el punto de cambio es más acertado.
-G_emv = sortperm(CumSums,rev=true)[1]
-G = CumSums[G_emv]
+# Estadístico de contraste (supremo)
+τ = sortperm(CumSums,rev=true)[1]
+Λ = CumSums[τ]
 
-#-----------------------------------------------------------------------------------
-#----------------- Ver evolución de la suma acumulada maxima -----------------------
-#-----------------------------------------------------------------------------------
-theta1 = Matrix(EMVs[G_emv][:,5:6])
-alpha1 = EMVs[G_emv][:,:alpha]
-
-cumsum = []
-
-@rput muestra_coords
-@rput theta1
-@rput alpha1
+# Cálculo del umbral de rechazo
+α = 0.05
+prob = α/n
+p = componentes+(componentes-1)
+@rput prob
+@rput p
 R"""
-p0 = dmovMF(muestra_coords, theta0, alpha0)
-p1 = dmovMF(muestra_coords, theta1, alpha1)
+umbral = qchisq(p=prob, df=p, lower.tail=FALSE)
 """
-@rget p0
-@rget p1
+@rget umbral
 
-s = log.(p1)-log.(p0)
-S = s[1]
-push!(cumsum,S)
-for i in 2:length(s)
-    S = S+s[i]
-    push!(cumsum,S)
-end
-cumsum
-sum(log.(p1)-log.(p0))
-
-x=range(1,110,length=110)
-plot(x,cumsum,title="Evolución ratio log-verosimilitud máximo",label=false)
-savefig("ratio-log-ver-max.png")
-
-#-------------------------------------------------------------------------------------
-#= 
-CumSums_total = []
-@rput muestra_coords
-for j in 1:tam-40
-    if EMVs[j] != 0
-
-        theta1 = Matrix(EMVs[j][:,5:6])
-        alpha1 = EMVs[j][:,:alpha]
-
-        @rput theta1
-        @rput alpha1
-        R"""
-        p0 = dmovMF(muestra_coords, theta0, alpha0)
-        p1 = dmovMF(muestra_coords, theta1, alpha1)
-        """
-        @rget p0
-        @rget p1
-
-        s = log.(p1)-log.(p0)
-        S = s[1]
-        print(S)
-        print("\n")
-        for i in 2:length(s)
-            S = S+s[i]
-            print(S)
-            print("\n")
-        end
-        push!(CumSums_total,S)
-    else
-        print("Invalid")
-        push!(CumSums_total,-1)
-    end
-    print("-----------------------------")
-end
-show(stdout, "text/plain", CumSums_total) =#
-
-dormitorio_bano
-EMVs[G_emv]
-# Obtener el umbral para ceptar el cambio (Bootstrap)
-using Bootstrap,Statistics
-n_boot = 1000
-
-bootstrap(maximum, )
-
-# Sacar con reemplazamiento N-40-4 y capturar G 100 veces
-
-muestra = muestra_coords[1:tam,:]
-
-theta1 = Matrix(EMVs[1][:,5:6])
-alpha1 = EMVs[1][:,:alpha]
-
-@rput muestra
-@rput theta1
-@rput alpha1
-R"""
-p0 = dmovMF(muestra, theta0, alpha0)
-p1 = dmovMF(muestra, theta1, alpha1)
-"""
-@rget p0
-@rget p1
-
-a = log.(p1)-log.(p0)
-show(stdout, "text/plain", a)
-
-cumsum = sum(log.(p1)-log.(p0))
-
-push!(CumSums,cumsum)
+# --------------------------------------------------------------------------------------------
